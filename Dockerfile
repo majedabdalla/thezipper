@@ -23,8 +23,9 @@ WORKDIR /app
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
 
-# Copy source
-COPY bot/ ./bot/
+# Copy source (path is relative to the build context — repo root)
+COPY ./bot ./bot
+COPY requirements.txt .
 
 # Temp directory writable by botuser
 RUN mkdir -p /app/temp && chown botuser:botuser /app/temp
