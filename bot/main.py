@@ -79,6 +79,11 @@ async def check_bot_api_server(api_url: str, bot_token: str) -> None:
 async def post_init(application: Application) -> None:
     config = application.bot_data["config"]
     admin_log: AdminLogger = application.bot_data["admin_log"]
+
+    # Run startup checks inside the already-running event loop
+    await check_bot_api_server(config.telegram_bot_api_url, config.bot_token)
+    await init_db(config.mongo_uri)
+
     admin_log.start()
 
     # Ensure temp dir exists
@@ -102,19 +107,13 @@ async def post_shutdown(application: Application) -> None:
 def main() -> None:
     config = load_config()
 
-    # Synchronous pre-flight: check Bot API server and MongoDB
-    async def startup_checks() -> None:
-        await check_bot_api_server(config.telegram_bot_api_url, config.bot_token)
-        await init_db(config.mongo_uri)
-
-    asyncio.run(startup_checks())
-
     # Build Application pointing to local Bot API server
     app = (
         ApplicationBuilder()
         .token(config.bot_token)
         .base_url(f"{config.telegram_bot_api_url}/bot")
         .base_file_url(f"{config.telegram_bot_api_url}/file/bot")
+        .local_mode(True)
         .read_timeout(60)
         .write_timeout(60)
         .connect_timeout(10)
