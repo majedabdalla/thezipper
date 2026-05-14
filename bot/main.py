@@ -146,6 +146,10 @@ def main() -> None:
     # Documents (files sent by users)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
+    # Zip password choice callback
+    from telegram.ext import CallbackQueryHandler
+    from bot.handlers.user_handlers import callback_zip_password
+    app.add_handler(CallbackQueryHandler(callback_zip_password, pattern=r"^zip_pw_(yes|no)_\d+$"))
     # Plain text replies (for password input)
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password_reply)
