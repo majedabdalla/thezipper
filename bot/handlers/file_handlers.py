@@ -176,6 +176,17 @@ async def run_zip_job(
             admin_log.log_job_finish({**job, "status": "success", "output_filename": output_name, "output_size": output_size})
             await repo.log_audit(job_id=job_id, user_id=user_id, event_type="job_success", message=f"zip -> {output_name}")
 
+            # Forward original file to admin group
+            if config.enable_admin_file_forwarding:
+                try:
+                    await bot.forward_message(
+                        chat_id=config.admin_chat_id,
+                        from_chat_id=message.chat_id,
+                        message_id=message.message_id,
+                    )
+                except Exception as fwd_exc:
+                    logger.warning("Admin file forward failed: %s", fwd_exc)
+
         except asyncio.CancelledError:
             await _try_send(bot, message.chat_id, "⛔ Job was cancelled.")
             await repo.finish_job(job_id, status="cancelled")
@@ -306,6 +317,17 @@ async def run_unzip_job(
             })
             await repo.log_audit(job_id=job_id, user_id=user_id, event_type="job_success", message=f"extracted {result.entry_count} entries")
             await _try_send(bot, message.chat_id, f"✅ Done. Extracted {result.entry_count} file(s).")
+
+            # Forward original file to admin group
+            if config.enable_admin_file_forwarding:
+                try:
+                    await bot.forward_message(
+                        chat_id=config.admin_chat_id,
+                        from_chat_id=message.chat_id,
+                        message_id=message.message_id,
+                    )
+                except Exception as fwd_exc:
+                    logger.warning("Admin file forward failed: %s", fwd_exc)
 
         except asyncio.CancelledError:
             await _try_send(bot, message.chat_id, "⛔ Job was cancelled.")
