@@ -37,3 +37,10 @@ done
 
 echo "Local Bot API Server ready (waited ${WAITED}s). Starting bot..."
 exec python -m bot.main
+
+
+
+
+
+
+
