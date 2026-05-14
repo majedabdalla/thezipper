@@ -55,4 +55,11 @@ USER botuser
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["./start.sh"]
+CMD ["/bin/bash", "/app/start.sh"]
+
+
+
+
+
+
+
