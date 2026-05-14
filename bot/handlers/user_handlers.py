@@ -4,15 +4,14 @@ State machine per user stored in bot_data (in-memory, ephemeral):
   pending_zip_{user_id}   -> file metadata waiting for /zip confirmation
   pending_unzip_{user_id} -> file metadata waiting for /unzip or password
   awaiting_password_{user_id} -> unzip job waiting for password text
+  zip_meta_{user_id}      -> file metadata waiting for zip password choice
+  zip_awaiting_pw_{user_id} -> file metadata waiting for zip password text
 """
 import logging
 from typing import Any, Dict, Optional
 
-from telegram import Document, Message, Update
-from telegram.ext import (
-    ContextTypes,
-    ConversationHandler,
-)
+from telegram import Document, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram.ext import ContextTypes
 
 from bot.config import Config
 from bot.core.queue import JobQueue, UserJobTracker
@@ -39,11 +38,9 @@ def _pw_key(uid: int) -> str:
 # ---------------------------------------------------------------------------
 
 async def _guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Return True if the request should proceed (user not banned, etc.)."""
     user = update.effective_user
     if not user:
         return False
-    config: Config = context.bot_data["config"]
     if await repo.is_banned(user.id):
         await update.message.reply_text("🚫 You are banned from using this bot.")
         return False
@@ -52,7 +49,6 @@ async def _guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 
 def _get_file_meta(update: Update) -> Optional[Dict[str, Any]]:
-    """Extract file metadata from a message containing a document."""
     msg = update.message
     if not msg or not msg.document:
         return None
@@ -65,7 +61,6 @@ def _get_file_meta(update: Update) -> Optional[Dict[str, Any]]:
 
 
 def _get_reply_file_meta(update: Update) -> Optional[Dict[str, Any]]:
-    """If the message replies to a file, return that file's metadata."""
     msg = update.message
     if not msg or not msg.reply_to_message:
         return None
@@ -114,7 +109,6 @@ async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     config: Config = context.bot_data["config"]
 
-    # File can come from a reply or a directly attached document
     meta = _get_reply_file_meta(update) or context.bot_data.pop(_pending_key("zip", user.id), None)
     if not meta:
         await update.message.reply_text(
@@ -135,12 +129,10 @@ async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Ask user if they want a password
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("🔐 Yes, set a password", callback_data=f"zip_pw_yes_{user.id}"),
         InlineKeyboardButton("🚀 No, just zip it", callback_data=f"zip_pw_no_{user.id}"),
     ]])
-    # Store meta for the callback
     context.bot_data[f"zip_meta_{user.id}"] = meta
     await update.message.reply_text(
         "🗜️ Do you want to protect this zip with a password?",
@@ -163,6 +155,7 @@ async def _submit_zip(
     job_id = new_job_id()
     await tracker.register(user.id, job_id)
 
+    user_message = update.message
     status_msg = await update.message.reply_text("⏳ Queuing zip job…")
 
     try:
@@ -177,6 +170,7 @@ async def _submit_zip(
                 user_id=user.id,
                 username=user.username or str(user.id),
                 message=status_msg,
+                user_message=user_message,
                 file_id=meta["file_id"],
                 original_filename=meta["filename"],
                 file_size=meta["file_size"],
@@ -228,9 +222,9 @@ async def _submit_unzip(
 
     job_id = new_job_id()
     await tracker.register(user.id, job_id)
-    # Save meta for potential password retry
     context.bot_data[_pw_key(user.id)] = {"meta": meta, "job_id": job_id}
 
+    user_message = update.message
     status_msg = await update.message.reply_text("⏳ Queuing unzip job…")
 
     try:
@@ -245,6 +239,7 @@ async def _submit_unzip(
                 user_id=user.id,
                 username=user.username or str(user.id),
                 message=status_msg,
+                user_message=user_message,
                 file_id=meta["file_id"],
                 original_filename=meta["filename"],
                 file_size=meta["file_size"],
@@ -272,12 +267,11 @@ async def handle_password_reply(update: Update, context: ContextTypes.DEFAULT_TY
 
     pw_state = context.bot_data.get(_pw_key(user.id))
     if not pw_state:
-        return  # not waiting for password; ignore
+        return
 
     password = update.message.text.strip()
     meta = pw_state["meta"]
 
-    # Clear state
     context.bot_data.pop(_pw_key(user.id), None)
 
     await update.message.reply_text("🔑 Got it. Retrying with password…")
@@ -289,7 +283,6 @@ async def handle_password_reply(update: Update, context: ContextTypes.DEFAULT_TY
 # ---------------------------------------------------------------------------
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Store file metadata when a user sends a file without a command."""
     if not await _guard(update, context):
         return
     user = update.effective_user
@@ -297,7 +290,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not meta:
         return
 
-    # Check caption for inline command: /zip or /unzip
     caption = (update.message.caption or "").strip().lower()
     if caption.startswith("/zip"):
         parts = caption.split()
@@ -308,7 +300,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _submit_unzip(update, context, meta, password=None)
         return
 
-    # Park the file for a follow-up command
     context.bot_data[_pending_key("zip", user.id)] = meta
     context.bot_data[_pending_key("unzip", user.id)] = meta
 
@@ -337,7 +328,6 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     cancelled = await job_queue.cancel_job(job_id)
     await tracker.unregister(user.id)
-    # Clear password state too
     context.bot_data.pop(_pw_key(user.id), None)
 
     if cancelled:
@@ -374,12 +364,13 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Status: {job['status']}",
         parse_mode="HTML",
     )
+
+
 # ---------------------------------------------------------------------------
 # Zip password flow callbacks
 # ---------------------------------------------------------------------------
 
 async def callback_zip_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     query = update.callback_query
     await query.answer()
     user = update.effective_user
@@ -401,16 +392,14 @@ async def callback_zip_password(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def handle_zip_password_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Called from handle_password_reply — handles zip password input."""
     user = update.effective_user
     meta = context.bot_data.pop(f"zip_awaiting_pw_{user.id}", None)
     if not meta:
-        return False  # not waiting for zip password
+        return
 
     password = update.message.text.strip()
-    await update.message.reply_text(f"🔐 Got it! Zipping with password…")
+    await update.message.reply_text("🔐 Got it! Zipping with password…")
     await _submit_zip(update, context, meta, password=password)
-    return True
 
 
 async def _submit_zip_from_callback(
@@ -429,6 +418,7 @@ async def _submit_zip_from_callback(
     job_id = new_job_id()
     await tracker.register(user.id, job_id)
 
+    user_message = update.effective_message
     status_msg = await update.effective_message.reply_text("⏳ Queuing zip job…")
 
     try:
@@ -443,6 +433,7 @@ async def _submit_zip_from_callback(
                 user_id=user.id,
                 username=user.username or str(user.id),
                 message=status_msg,
+                user_message=user_message,
                 file_id=meta["file_id"],
                 original_filename=meta["filename"],
                 file_size=meta["file_size"],
@@ -452,8 +443,3 @@ async def _submit_zip_from_callback(
     except RuntimeError as exc:
         await update.effective_message.reply_text(f"⚠️ {exc}")
         await tracker.unregister(user.id)
-
-
-
-
-
