@@ -129,12 +129,23 @@ async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Check for optional password in command args: /zip password123
-    password: Optional[str] = None
+    # If password already provided as argument: /zip mypassword
     if context.args:
-        password = context.args[0]
+        await _submit_zip(update, context, meta, password=context.args[0])
+        return
 
-    await _submit_zip(update, context, meta, password)
+    # Ask user if they want a password
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔐 Yes, set a password", callback_data=f"zip_pw_yes_{user.id}"),
+        InlineKeyboardButton("🚀 No, just zip it", callback_data=f"zip_pw_no_{user.id}"),
+    ]])
+    # Store meta for the callback
+    context.bot_data[f"zip_meta_{user.id}"] = meta
+    await update.message.reply_text(
+        "🗜️ Do you want to protect this zip with a password?",
+        reply_markup=keyboard,
+    )
 
 
 async def _submit_zip(
@@ -250,12 +261,13 @@ async def _submit_unzip(
 # ---------------------------------------------------------------------------
 
 async def handle_password_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Called when a user sends a plain text message.
-    If we're waiting for a password for an unzip job, use it.
-    """
     user = update.effective_user
     if not user:
+        return
+
+    # Check if waiting for zip password first
+    if context.bot_data.get(f"zip_awaiting_pw_{user.id}"):
+        await handle_zip_password_input(update, context)
         return
 
     pw_state = context.bot_data.get(_pw_key(user.id))
@@ -362,3 +374,86 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Status: {job['status']}",
         parse_mode="HTML",
     )
+# ---------------------------------------------------------------------------
+# Zip password flow callbacks
+# ---------------------------------------------------------------------------
+
+async def callback_zip_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+
+    meta = context.bot_data.pop(f"zip_meta_{user.id}", None)
+    if not meta:
+        await query.edit_message_text("❌ Session expired. Please send the file again.")
+        return
+
+    if query.data.startswith("zip_pw_no_"):
+        await query.edit_message_text("🚀 Got it! Starting zip without password…")
+        await _submit_zip_from_callback(update, context, meta, password=None)
+
+    elif query.data.startswith("zip_pw_yes_"):
+        context.bot_data[f"zip_awaiting_pw_{user.id}"] = meta
+        await query.edit_message_text(
+            "🔐 Please type the password you want to use for this zip file."
+        )
+
+
+async def handle_zip_password_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Called from handle_password_reply — handles zip password input."""
+    user = update.effective_user
+    meta = context.bot_data.pop(f"zip_awaiting_pw_{user.id}", None)
+    if not meta:
+        return False  # not waiting for zip password
+
+    password = update.message.text.strip()
+    await update.message.reply_text(f"🔐 Got it! Zipping with password…")
+    await _submit_zip(update, context, meta, password=password)
+    return True
+
+
+async def _submit_zip_from_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    meta: Dict[str, Any],
+    password: Optional[str],
+) -> None:
+    """Same as _submit_zip but works from a callback query context."""
+    user = update.effective_user
+    config: Config = context.bot_data["config"]
+    job_queue: JobQueue = context.bot_data["job_queue"]
+    tracker: UserJobTracker = context.bot_data["user_tracker"]
+    admin_log: AdminLogger = context.bot_data["admin_log"]
+
+    job_id = new_job_id()
+    await tracker.register(user.id, job_id)
+
+    status_msg = await update.effective_message.reply_text("⏳ Queuing zip job…")
+
+    try:
+        await job_queue.submit(
+            job_id=job_id,
+            user_id=user.id,
+            coro_factory=lambda: run_zip_job(
+                bot=context.bot,
+                config=config,
+                admin_log=admin_log,
+                job_id=job_id,
+                user_id=user.id,
+                username=user.username or str(user.id),
+                message=status_msg,
+                file_id=meta["file_id"],
+                original_filename=meta["filename"],
+                file_size=meta["file_size"],
+                password=password,
+            ),
+        )
+    except RuntimeError as exc:
+        await update.effective_message.reply_text(f"⚠️ {exc}")
+        await tracker.unregister(user.id)
+
+
+
+
+
