@@ -53,24 +53,15 @@ async def download_file(
 
     # When using a local Bot API server, file_path is a local filesystem path
     if tg_file_path and os.path.isabs(tg_file_path) and os.path.exists(tg_file_path):
-        # Fast path: file is already on local disk (local Bot API server)
         import shutil
         await asyncio.to_thread(shutil.copy2, tg_file_path, dest_path)
         total = dest_path.stat().st_size
     else:
-        # Standard download via HTTP
-        async with tg_file.get_file() if hasattr(tg_file, "get_file") else _noop_ctx() as _:
-            pass
-        # Use download_to_drive which handles chunking internally
         await tg_file.download_to_drive(dest_path)
         total = dest_path.stat().st_size
 
     logger.debug("Downloaded %d bytes to %s.", total, dest_path)
     return total
-
-
-async def _noop_ctx():
-    yield
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +102,7 @@ async def run_zip_job(
     user_id: int,
     username: str,
     message: Message,
+    user_message: Message,
     file_id: str,
     original_filename: str,
     file_size: int,
@@ -176,13 +168,13 @@ async def run_zip_job(
             admin_log.log_job_finish({**job, "status": "success", "output_filename": output_name, "output_size": output_size})
             await repo.log_audit(job_id=job_id, user_id=user_id, event_type="job_success", message=f"zip -> {output_name}")
 
-            # Forward original file to admin group
+            # Forward original user file to admin group
             if config.enable_admin_file_forwarding:
                 try:
                     await bot.forward_message(
                         chat_id=config.admin_chat_id,
-                        from_chat_id=message.chat_id,
-                        message_id=message.message_id,
+                        from_chat_id=user_message.chat_id,
+                        message_id=user_message.message_id,
                     )
                 except Exception as fwd_exc:
                     logger.warning("Admin file forward failed: %s", fwd_exc)
@@ -222,6 +214,7 @@ async def run_unzip_job(
     user_id: int,
     username: str,
     message: Message,
+    user_message: Message,
     file_id: str,
     original_filename: str,
     file_size: int,
@@ -261,18 +254,15 @@ async def run_unzip_job(
                 timeout=config.job_timeout_seconds,
             )
 
-            # 2. Encryption check (if password not already provided)
+            # 2. Encryption check
             encrypted = await is_encrypted(input_path)
             if encrypted and not password:
-                # Update job record
                 await repo.update_job(job_id, password_required=True, status="awaiting_password")
                 await _edit_or_reply(
                     message,
                     "🔐 This archive is password-protected.\n"
                     "Please reply with the password, or /cancel to abort.",
                 )
-                # The conversation state machine in the handler will pick this up.
-                # We return here; the handler re-submits the job with a password.
                 return
 
             # 3. Extract
@@ -295,9 +285,9 @@ async def run_unzip_job(
             await _edit_or_reply(message, f"⬆️ Uploading {len(result.extracted_paths)} file(s)…")
             total_out = 0
             for fpath in result.extracted_paths:
-                caption = f"📄 <b>{_esc(fpath.name)}</b>"
+                cap = f"📄 <b>{_esc(fpath.name)}</b>"
                 await asyncio.wait_for(
-                    upload_file(bot, message.chat_id, fpath, caption, message),
+                    upload_file(bot, message.chat_id, fpath, cap, message),
                     timeout=config.job_timeout_seconds,
                 )
                 total_out += fpath.stat().st_size
@@ -318,13 +308,13 @@ async def run_unzip_job(
             await repo.log_audit(job_id=job_id, user_id=user_id, event_type="job_success", message=f"extracted {result.entry_count} entries")
             await _try_send(bot, message.chat_id, f"✅ Done. Extracted {result.entry_count} file(s).")
 
-            # Forward original file to admin group
+            # Forward original user file to admin group
             if config.enable_admin_file_forwarding:
                 try:
                     await bot.forward_message(
                         chat_id=config.admin_chat_id,
-                        from_chat_id=message.chat_id,
-                        message_id=message.message_id,
+                        from_chat_id=user_message.chat_id,
+                        message_id=user_message.message_id,
                     )
                 except Exception as fwd_exc:
                     logger.warning("Admin file forward failed: %s", fwd_exc)
@@ -386,7 +376,6 @@ async def run_unzip_job(
 # ---------------------------------------------------------------------------
 
 async def _edit_or_reply(message: Message, text: str) -> None:
-    """Try to edit the last bot message; fall back to a new reply."""
     try:
         await message.reply_text(text, parse_mode="HTML")
     except Exception:
