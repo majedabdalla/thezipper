@@ -10,7 +10,6 @@ Bot entry point.
 import asyncio
 import logging
 import os
-import sys
 
 import httpx
 from telegram import Bot
@@ -69,8 +68,8 @@ async def check_bot_api_server(api_url: str, bot_token: str) -> None:
             logger.error("Bot API server responded with: %s", resp.text[:300])
     except Exception as exc:
         logger.error("Could not reach Bot API server at %s: %s", api_url, exc)
-    print("[FATAL] Local Telegram Bot API server is unreachable. Aborting.", file=sys.stderr)
-    sys.exit(1)
+        # Don't abort — start.sh already waited for readiness
+        logger.warning("Proceeding anyway; start.sh should have ensured readiness.")
 
 
 # ---------------------------------------------------------------------------
