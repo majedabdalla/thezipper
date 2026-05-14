@@ -1,39 +1,58 @@
-# ── Build stage ──────────────────────────────────────────────────────────────
-FROM python:3.11-slim AS builder
+# ── Stage 1: Build telegram-bot-api from source ──────────────────────────────
+FROM debian:bookworm-slim AS tgapi-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    make git zlib1g-dev libssl-dev gperf cmake g++ ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --recursive --depth=1 https://github.com/tdlib/telegram-bot-api.git /src
+
+RUN mkdir -p /src/build && cd /src/build && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DOPENSSL_ROOT_DIR=/usr \
+          .. && \
+    cmake --build . --target install -j$(nproc)
+
+# ── Stage 2: Python deps builder ─────────────────────────────────────────────
+FROM python:3.11-slim AS py-builder
 
 WORKDIR /build
 
-# System deps needed to compile some wheels (motor/pymongo C extensions)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
+RUN apt-get update && apt-get install -y --no-install-recommends gcc \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-
-# ── Runtime stage ─────────────────────────────────────────────────────────────
+# ── Stage 3: Runtime ──────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Non-root user for security
+COPY --from=tgapi-builder /usr/local/bin/telegram-bot-api /usr/local/bin/telegram-bot-api
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    libssl3 \
+    zlib1g \
+    libstdc++6 \
+    libgcc-s1 \
+    libc6 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --create-home --shell /bin/bash botuser
 
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /install /usr/local
-
-# Copy source (path is relative to the build context — repo root)
+COPY --from=py-builder /install /usr/local
 COPY ./bot ./bot
 COPY requirements.txt .
+COPY start.sh .
 
-# Temp directory writable by botuser
-RUN mkdir -p /app/temp && chown botuser:botuser /app/temp
+RUN mkdir -p /app/temp /app/tg_data && chown -R botuser:botuser /app
 
 USER botuser
 
-# Railway sets PORT but the bot uses polling, so no port binding needed.
-# If you switch to webhooks, EXPOSE 8443 here.
+ENV PYTHONUNBUFFERED=1
 
-# Fail fast if BOT_TOKEN or MONGO_URI are missing (validated in config.py)
-CMD ["python", "-m", "bot.main"]
+CMD ["./start.sh"]
