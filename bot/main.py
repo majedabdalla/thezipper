@@ -27,8 +27,10 @@ from bot.core.queue import JobQueue, UserJobTracker
 from bot.db.mongo import close_db, init_db
 from bot.handlers.admin_handlers import (
     cmd_ban,
+    cmd_broadcast,
     cmd_canceljob,
     cmd_jobs,
+    cmd_send,
     cmd_setlimit,
     cmd_stats,
     cmd_unban,
