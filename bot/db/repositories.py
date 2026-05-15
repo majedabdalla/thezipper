@@ -11,6 +11,7 @@ from .mongo import COL_AUDIT_LOGS, COL_BANS, COL_JOBS, COL_LIMITS, COL_USERS, ge
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -46,6 +47,21 @@ async def upsert_user(user_id: int, username: str) -> None:
 
 async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
     return await get_db()[COL_USERS].find_one({"user_id": user_id})
+
+
+async def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
+    """Case-insensitive username lookup. Strips leading @ if present."""
+    clean = username.lstrip("@")
+    return await get_db()[COL_USERS].find_one(
+        {"username": {"$regex": f"^{clean}$", "$options": "i"}}
+    )
+
+
+async def get_all_user_ids() -> List[int]:
+    """Return all non-banned user IDs for broadcast."""
+    cursor = get_db()[COL_USERS].find({"is_banned": False}, {"user_id": 1})
+    docs = await cursor.to_list(length=None)
+    return [d["user_id"] for d in docs]
 
 
 async def increment_bytes(user_id: int, byte_count: int) -> None:
