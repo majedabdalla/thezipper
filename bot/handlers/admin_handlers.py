@@ -2,10 +2,12 @@
 Admin-only command handlers.
 All handlers verify the caller is in ADMIN_USER_IDS before proceeding.
 """
+import asyncio
 import logging
 from typing import FrozenSet
 
 from telegram import Update
+from telegram.error import Forbidden, RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 from bot.config import Config
@@ -215,7 +217,6 @@ async def cmd_canceljob(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     prefix = context.args[0]
     job_queue: JobQueue = context.bot_data["job_queue"]
 
-    # Find a matching job_id by prefix
     matched = [jid for jid in job_queue.get_active_job_ids() if jid.startswith(prefix)]
     if not matched:
         await update.message.reply_text("❌ No running job matches that ID.")
@@ -230,3 +231,146 @@ async def cmd_canceljob(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(f"⛔ Job <code>{matched[0][:8]}</code> cancelled.", parse_mode="HTML")
     else:
         await update.message.reply_text("ℹ️ Job already finished.")
+
+
+# ---------------------------------------------------------------------------
+# /send [user_id or @username] [message]
+# ---------------------------------------------------------------------------
+
+async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_admin(update, context):
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /send <user_id or @username> <message>\n"
+            "Example: /send 123456789 Hello there!\n"
+            "Example: /send @username Hello there!"
+        )
+        return
+
+    target_token = context.args[0]
+    text = " ".join(context.args[1:])
+    target_id = None
+
+    # Resolve by user_id or @username
+    if target_token.lstrip("@").lstrip("-").isdigit():
+        target_id = int(target_token.lstrip("@"))
+    else:
+        # Look up by username in DB
+        username_clean = target_token.lstrip("@")
+        user_doc = await repo.get_user_by_username(username_clean)
+        if user_doc:
+            target_id = user_doc["user_id"]
+
+    if target_id is None:
+        await update.message.reply_text(
+            f"❌ Could not find user <code>{target_token}</code> in the database.",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=f"📩 <b>Message from Admin:</b>\n\n{text}",
+            parse_mode="HTML",
+        )
+        await update.message.reply_text(
+            f"✅ Message delivered to <code>{target_id}</code>.",
+            parse_mode="HTML",
+        )
+        logger.info("Admin %s sent message to user %s.", update.effective_user.id, target_id)
+    except Forbidden:
+        await update.message.reply_text(
+            f"❌ Cannot send: user <code>{target_id}</code> has blocked the bot.",
+            parse_mode="HTML",
+        )
+    except TelegramError as exc:
+        await update.message.reply_text(f"❌ Delivery failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# /broadcast [message]
+# ---------------------------------------------------------------------------
+
+async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _is_admin(update, context):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /broadcast <message>\n"
+            "Example: /broadcast The bot has been updated!"
+        )
+        return
+
+    text = " ".join(context.args)
+    user_ids = await repo.get_all_user_ids()
+    total = len(user_ids)
+
+    if total == 0:
+        await update.message.reply_text("ℹ️ No users in the database yet.")
+        return
+
+    status_msg = await update.message.reply_text(
+        f"📢 Starting broadcast to <b>{total}</b> users…",
+        parse_mode="HTML",
+    )
+
+    sent = 0
+    failed = 0
+    blocked = 0
+
+    for i, uid in enumerate(user_ids):
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=f"📢 <b>Announcement</b>\n\n{text}",
+                parse_mode="HTML",
+            )
+            sent += 1
+        except Forbidden:
+            # User blocked the bot
+            blocked += 1
+        except RetryAfter as exc:
+            # Telegram flood control — wait and retry once
+            wait = exc.retry_after + 1
+            logger.warning("Broadcast flood control: sleeping %ss.", wait)
+            await asyncio.sleep(wait)
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text=f"📢 <b>Announcement</b>\n\n{text}",
+                    parse_mode="HTML",
+                )
+                sent += 1
+            except TelegramError:
+                failed += 1
+        except TelegramError as exc:
+            logger.warning("Broadcast failed for user %s: %s", uid, exc)
+            failed += 1
+
+        # Update progress every 20 users
+        if (i + 1) % 20 == 0:
+            try:
+                await status_msg.edit_text(
+                    f"📢 Broadcasting… <b>{i + 1}/{total}</b>",
+                    parse_mode="HTML",
+                )
+            except TelegramError:
+                pass
+
+        # Delay between messages to respect Telegram's rate limit
+        # Telegram allows ~30 messages/second to different users
+        # We use 0.05s (20/sec) to stay safely under the limit
+        await asyncio.sleep(0.05)
+
+    await status_msg.edit_text(
+        f"✅ <b>Broadcast complete.</b>\n\n"
+        f"✅ Delivered: <b>{sent}</b>\n"
+        f"🚫 Blocked: <b>{blocked}</b>\n"
+        f"❌ Failed: <b>{failed}</b>\n"
+        f"📊 Total: <b>{total}</b>",
+        parse_mode="HTML",
+    )
+    logger.info("Broadcast by admin %s: sent=%s blocked=%s failed=%s total=%s",
+                update.effective_user.id, sent, blocked, failed, total)
