@@ -13,6 +13,7 @@ from telegram.ext import ContextTypes
 from bot.config import Config
 from bot.core.queue import JobQueue, UserJobTracker
 from bot.db import repositories as repo
+from bot.services.admin_logger import _mention, _user_display
 
 logger = logging.getLogger(__name__)
 
@@ -138,9 +139,14 @@ async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ) or "  (none)"
 
     banned = "🚫 Yes" if user_doc.get("is_banned") else "No"
+    username = user_doc.get("username", "")
+
+    # Header line: tappable mention so admins can open the profile directly,
+    # plus @username (when available) and numeric ID for copy-paste.
+    user_display = _user_display(target_id, username)
+
     lines = [
-        f"<b>User info</b>: <code>{target_id}</code>",
-        f"Username: @{user_doc.get('username', '?')}",
+        f"<b>User info:</b> {user_display}",
         f"Banned: {banned}",
         f"Daily processed: {_fmt_bytes(user_doc.get('daily_bytes_processed', 0))}",
         f"Total processed: {_fmt_bytes(user_doc.get('total_bytes_processed', 0))}",
@@ -193,9 +199,11 @@ async def cmd_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines = ["<b>Active jobs</b>"]
     for j in jobs[:20]:
         marker = "▶️" if j["job_id"] in in_flight_ids else "⏳"
+        username = j.get("username", "")
+        user_display = _user_display(j["user_id"], username)
         lines.append(
             f"{marker} <code>{j['job_id'][:8]}</code> "
-            f"user={j['user_id']} "
+            f"user={user_display} "
             f"action={j['action']} "
             f"status={j['status']} "
             f"file={j['input_filename']}"
@@ -251,16 +259,17 @@ async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     target_token = context.args[0]
     text = " ".join(context.args[1:])
     target_id = None
+    resolved_username = ""
 
     # Resolve by user_id or @username
     if target_token.lstrip("@").lstrip("-").isdigit():
         target_id = int(target_token.lstrip("@"))
     else:
-        # Look up by username in DB
         username_clean = target_token.lstrip("@")
         user_doc = await repo.get_user_by_username(username_clean)
         if user_doc:
             target_id = user_doc["user_id"]
+            resolved_username = user_doc.get("username", "")
 
     if target_id is None:
         await update.message.reply_text(
@@ -275,8 +284,9 @@ async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             text=f"📩 <b>Message from Admin:</b>\n\n{text}",
             parse_mode="HTML",
         )
+        user_display = _user_display(target_id, resolved_username or target_token)
         await update.message.reply_text(
-            f"✅ Message delivered to <code>{target_id}</code>.",
+            f"✅ Message delivered to {user_display}.",
             parse_mode="HTML",
         )
         logger.info("Admin %s sent message to user %s.", update.effective_user.id, target_id)
@@ -329,10 +339,8 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             sent += 1
         except Forbidden:
-            # User blocked the bot
             blocked += 1
         except RetryAfter as exc:
-            # Telegram flood control — wait and retry once
             wait = exc.retry_after + 1
             logger.warning("Broadcast flood control: sleeping %ss.", wait)
             await asyncio.sleep(wait)
@@ -349,7 +357,6 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             logger.warning("Broadcast failed for user %s: %s", uid, exc)
             failed += 1
 
-        # Update progress every 20 users
         if (i + 1) % 20 == 0:
             try:
                 await status_msg.edit_text(
@@ -359,9 +366,6 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             except TelegramError:
                 pass
 
-        # Delay between messages to respect Telegram's rate limit
-        # Telegram allows ~30 messages/second to different users
-        # We use 0.05s (20/sec) to stay safely under the limit
         await asyncio.sleep(0.05)
 
     await status_msg.edit_text(
