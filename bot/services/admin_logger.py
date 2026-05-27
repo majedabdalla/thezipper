@@ -73,10 +73,12 @@ class AdminLogger:
     def log_job_start(self, job: Dict[str, Any], username: str) -> None:
         if not self._config.enable_admin_summary_logs:
             return
+        # Build display: tappable mention + @username (if set) + numeric ID
+        user_display = _user_display(job["user_id"], username)
         lines = [
             f"<b>🔵 Job started</b>",
             f"<b>Job:</b> <code>{job['job_id'][:8]}</code>",
-            f"<b>User:</b> {_esc(username)} (<code>{job['user_id']}</code>)",
+            f"<b>User:</b> {user_display}",
             f"<b>Action:</b> {job['action']}",
             f"<b>File:</b> {_esc(job['input_filename'])} ({_fmt_bytes(job['input_size'])})",
             f"<b>Encrypted:</b> {job.get('encrypted_output', False)}",
@@ -88,11 +90,13 @@ class AdminLogger:
     def log_job_finish(self, job: Dict[str, Any]) -> None:
         if not self._config.enable_admin_summary_logs:
             return
+        username = job.get("username", "")
+        user_display = _user_display(job["user_id"], username)
         status_icon = "✅" if job["status"] == "success" else "❌"
         lines = [
             f"<b>{status_icon} Job finished</b>",
             f"<b>Job:</b> <code>{job['job_id'][:8]}</code>",
-            f"<b>User:</b> {_esc(job.get('username','?'))} (<code>{job['user_id']}</code>)",
+            f"<b>User:</b> {user_display}",
             f"<b>Action:</b> {job['action']}",
             f"<b>Input:</b> {_esc(job['input_filename'])} ({_fmt_bytes(job['input_size'])})",
         ]
@@ -169,6 +173,35 @@ def _esc(text: str) -> str:
             .replace("<", "&lt;")
             .replace(">", "&gt;")
     )
+
+
+def _mention(user_id: int, display_name: str) -> str:
+    """
+    Return a tappable HTML inline mention that works for every Telegram user
+    regardless of whether they have a @username set.  The tg://user URI is
+    resolved by Telegram clients to open the user's profile directly.
+    """
+    return f'<a href="tg://user?id={user_id}">{_esc(display_name)}</a>'
+
+
+def _user_display(user_id: int, username: str) -> str:
+    """
+    Compose the canonical user field used in all admin log lines:
+
+      • If the user has a @username:
+            @username (clickable) · 123456789
+      • If they don't (username is empty / equals their numeric ID):
+            User 123456789 (clickable) · 123456789
+
+    The inline mention makes the label tappable in every Telegram client,
+    while the plain numeric ID at the end stays selectable for copy-paste.
+    """
+    if username and username != str(user_id):
+        # Preserve the @ prefix so it reads naturally as a handle
+        handle = username if username.startswith("@") else f"@{username}"
+        return f"{_mention(user_id, handle)} (<code>{user_id}</code>)"
+    # No username — fall back to a generic label that is still tappable
+    return f"{_mention(user_id, f'User {user_id}')} (<code>{user_id}</code>)"
 
 
 def _fmt_bytes(n: int) -> str:
